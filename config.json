@@ -1,0 +1,13 @@
+{
+  "config": {
+    "targetDeck": "3)日常::漢字",
+    "searchField": "kanji",
+    "additionalField": "keyword",
+    "sourceField": "Expression",
+    "destinationField": "Constituents",
+    "noteTypes": "",
+    "lookupOnAdd": true,
+    "bulkActionLabel": "Bulk‑add Constituents",
+    "debug": true
+  }
+}
