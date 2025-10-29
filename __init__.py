@@ -15,22 +15,18 @@ kanji’s keyword/meaning pulled from a separate single-kanji deck.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Dict, List, Set
 
-from aqt import mw
-from aqt.qt import (
-    QAction,
-    QCheckBox,
-    QDialog,
-    QDialogButtonBox,
-    QFormLayout,
-    QLineEdit,
-)
-from aqt.utils import showInfo, tooltip
 from anki.hooks import addHook
+from aqt import gui_hooks, mw
+from aqt.qt import (QAction, QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
+                    QLineEdit)
+from aqt.utils import showInfo, tooltip
 
+CACHE_FILE = ADDON_DIR / "kanji_cache.json"
 ###############################################################################
 # Configuration helpers
 ###############################################################################
@@ -270,12 +266,90 @@ def show_options():
     CFG = _load_cfg()
     showInfo("Kanji Constituent settings saved.")
 
+def load_cache() -> Dict[str, str]:
+    if CACHE_FILE.exists():
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print("[Kanji Constituent] Cache load failed:", e)
+    return {}
+
+
+def save_cache(cache: Dict[str, str]) -> None:
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("[Kanji Constituent] Cache write failed:", e)
+
+
+KANJI_CACHE = load_cache()
+
+
+def lookup_with_cache(word: str) -> Dict[str, str]:
+    global KANJI_CACHE
+
+    kanji_list = extract_unique_kanji(word)
+    result: Dict[str, str] = {}
+    new_kanji: List[str] = []
+
+    # Step 1: Check cache
+    for k in kanji_list:
+        if k in KANJI_CACHE:
+            result[k] = KANJI_CACHE[k]
+        else:
+            new_kanji.append(k)
+
+    # Step 2: Deck lookup for missing ones
+    if new_kanji:
+        meanings = lookup_meanings(new_kanji)
+        result.update(meanings)
+        # Update cache
+        KANJI_CACHE.update(meanings)
+        save_cache(KANJI_CACHE)
+
+    return result
+
+
+def inject_hover_script(web_content, context):
+    """Inject JS into reviewer to handle Ctrl+K lookup trigger."""
+    if context != "reviewer":
+        return
+    js = """
+    <script>
+    document.addEventListener('keydown', function(e) {
+        if (e.ctrlKey && e.key === 'k') {
+            const sel = window.getSelection().toString().trim();
+            if (!sel) return;
+            pycmd('kanjiLookup:' + sel);
+            e.preventDefault();
+        }
+    });
+    </script>
+    """
+    web_content.head += js
+
+
+def on_js_command(handled, cmd, context):
+    """Receive JS messages from reviewer webview."""
+    if cmd.startswith("kanjiLookup:"):
+        word = cmd.split(":", 1)[1]
+        meanings = lookup_with_cache(word)
+        if meanings:
+            msg = "<br>".join(f"{k}: {v}" for k, v in meanings.items() if v)
+        else:
+            msg = f"No kanji found in '{word}'."
+        tooltip(msg, period=5000)
+        return (True, None)
+    return handled
+
+
+gui_hooks.webview_will_set_content.append(inject_hover_script)
+gui_hooks.webview_did_receive_js_message.append(on_js_command)
 
 menu_act = QAction("Kanji Constituent Options…", mw)
 menu_act.triggered.connect(show_options)
 mw.form.menuTools.addSeparator()
 mw.form.menuTools.addAction(menu_act)
 
-###############################################################################
-# End of file
-###############################################################################
