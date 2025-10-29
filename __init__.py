@@ -21,12 +21,17 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 from anki.hooks import addHook
-from aqt import gui_hooks, mw
+from aqt import clayout, gui_hooks, mw
+from aqt import reviewer as aqt_reviewer
 from aqt.qt import (QAction, QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
                     QLineEdit)
 from aqt.utils import showInfo, tooltip
 
-CACHE_FILE = ADDON_DIR / "kanji_cache.json"
+try:
+    from aqt.previewer import Previewer  # Anki 2.1.60+
+except Exception:
+    Previewer = None
+
 ###############################################################################
 # Configuration helpers
 ###############################################################################
@@ -34,6 +39,7 @@ CACHE_FILE = ADDON_DIR / "kanji_cache.json"
 ADDON_NAME = __name__  # folder name
 ADDON_DIR = Path(mw.addonManager.addonsFolder()) / ADDON_NAME
 CFG_FILE = ADDON_DIR / "config.json"
+CACHE_FILE = ADDON_DIR / "kanji_cache.json"
 
 
 def _defaults() -> Dict[str, object]:
@@ -47,6 +53,8 @@ def _defaults() -> Dict[str, object]:
         "noteTypes": "",              # comma-separated list
         "bulkActionLabel": "Bulk-add Constituents",
         "debug": False,
+        "hoverFontSize": "auto",
+        "hoverOffset":"0"
     }
 
 
@@ -226,6 +234,8 @@ def show_options():
     w_types = QLineEdit(str(CFG["noteTypes"]))
     w_lookup = QCheckBox("Populate when leaving expression field")
     w_lookup.setChecked(bool(CFG["lookupOnAdd"]))
+    w_hover_font = QLineEdit(str(CFG.get("hoverFontSize", "auto")))
+    w_hover_offset = QLineEdit(str(CFG.get("hoverOffset", "0")))
     w_debug = QCheckBox("Enable debug logging (print to console)")
     w_debug.setChecked(bool(CFG["debug"]))
 
@@ -235,6 +245,8 @@ def show_options():
     lay.addRow("Source field:", w_source)
     lay.addRow("Destination field:", w_dest)
     lay.addRow("Note-type filter (comma):", w_types)
+    lay.addRow("Hover font size (px or 'auto'):", w_hover_font)
+    lay.addRow("Hover offset from top (px'):", w_hover_offset)
     lay.addRow(w_lookup)
     lay.addRow(w_debug)
 
@@ -259,6 +271,8 @@ def show_options():
         "noteTypes": w_types.text().strip(),
         "lookupOnAdd": w_lookup.isChecked(),
         "bulkActionLabel": CFG["bulkActionLabel"],
+        "hoverFontSize": w_hover_font.text().strip() or "auto",
+        "hoverOffset": w_hover_offset.text().strip() or "0",
         "debug": w_debug.isChecked(),
     }
 
@@ -313,40 +327,141 @@ def lookup_with_cache(word: str) -> Dict[str, str]:
 
 
 def inject_hover_script(web_content, context):
-    """Inject JS into reviewer to handle Ctrl+K lookup trigger."""
-    if context != "reviewer":
+    """Injects JS for Ctrl+K and context menu in reviewer/previewer."""
+    cname = type(context).__name__
+    print("[HoverDebug] injecting into:", cname)
+
+    # Allow reviewer, previewer, card layout (and bottom bar to be safe)
+    allowed_types = [aqt_reviewer.Reviewer, clayout.CardLayout]
+    if Previewer:
+        allowed_types.append(Previewer)
+
+    # Some builds pass a ReviewerBottomBar; allow by class name
+    allowed_classnames = {"ReviewerBottomBar"}
+
+    if not (
+        isinstance(context, tuple(allowed_types))
+        or cname in allowed_classnames
+    ):
         return
-    js = """
+    font_size = str(CFG.get("hoverFontSize", "auto"))
+    hover_offset = str(CFG.get("hoverOffset", "0"))
+    js = f"""
     <script>
-    document.addEventListener('keydown', function(e) {
-        if (e.ctrlKey && e.key === 'k') {
-            const sel = window.getSelection().toString().trim();
-            if (!sel) return;
-            pycmd('kanjiLookup:' + sel);
-            e.preventDefault();
-        }
-    });
+    (function() {{
+        if (window.__KANJI_LOOKUP_INJECTED__) return;
+        window.__KANJI_LOOKUP_INJECTED__ = true;
+
+        const HOVER_FONT_SIZE = "{font_size}";
+        const HOVER_OFFSET = "{hover_offset}";
+
+        function sendLookup(text) {{
+            if (!text) return;
+            try {{ pycmd('kanjiLookup:' + text); }} catch (e) {{ console.log(e); }}
+        }}
+
+        function getFrameDoc() {{
+            const iframe = document.querySelector('#qa');
+            if (iframe && iframe.contentDocument) return iframe.contentDocument;
+            return document;
+        }}
+
+        function getSelectionRect(doc) {{
+            if (!doc) return null;
+            const sel = doc.getSelection ? doc.getSelection() : null;
+            if (!sel || !sel.rangeCount) return null;
+            return sel.getRangeAt(0).getBoundingClientRect();
+        }}
+
+        function detectFontSize(doc) {{
+            const sel = doc.getSelection();
+            if (!sel || sel.rangeCount === 0) return null;
+            const node = sel.anchorNode && sel.anchorNode.parentElement;
+            if (!node) return null;
+            const style = doc.defaultView.getComputedStyle(node);
+            return style.fontSize || null;
+        }}
+
+        function showLookupTooltip(text, html) {{
+            const doc = getFrameDoc();
+            const rect = getSelectionRect(doc);
+            if (!rect) return;
+
+            const tip = doc.createElement('div');
+            tip.className = 'kanji-tooltip';
+            tip.innerHTML = html;
+
+            let fs = HOVER_FONT_SIZE;
+            if (fs === "auto") {{
+                const detected = detectFontSize(doc);
+                if (detected) fs = detected;
+                else fs = "16px";
+            }} else {{
+                fs = fs.replace(/[^0-9.]/g, '') + 'px';
+            }}
+
+            Object.assign(tip.style, {{
+                position: 'absolute',
+                left: rect.left + 'px',
+                top: (rect.top + doc.documentElement.scrollTop - 40 + HOVER_OFFSET) + 'px',
+                background: 'rgba(20,20,20,0.95)',
+                color: 'white',
+                padding: '6px 10px',
+                borderRadius: '8px',
+                fontSize: fs,
+                lineHeight: '1.4',
+                zIndex: 99999,
+                boxShadow: '0 2px 10px rgba(0,0,0,0.4)',
+                pointerEvents: 'none',
+                maxWidth: '90%',
+                wordWrap: 'break-word',
+                opacity: '0',
+                transition: 'opacity 0.15s ease-in'
+            }});
+
+            doc.body.appendChild(tip);
+            requestAnimationFrame(() => {{ tip.style.opacity = '1'; }});
+            setTimeout(() => {{
+                tip.style.opacity = '0';
+                setTimeout(() => tip.remove(), 200);
+            }}, 5000);
+        }}
+
+        window.AnkiHoverShow = showLookupTooltip;
+
+        document.addEventListener('keydown', function(e) {{
+            if (e.key === 'F9' || (e.ctrlKey && e.key.toLowerCase() === 'k')) {{
+                const doc = getFrameDoc();
+                const sel = doc.getSelection ? doc.getSelection().toString().trim() : '';
+                if (!sel) return;
+                sendLookup(sel);
+                e.preventDefault();
+                e.stopPropagation();
+            }}
+        }}, {{capture: true}});
+
+        console.log('[KanjiHover] script injected (font size aware)');
+    }})();
     </script>
     """
     web_content.head += js
 
 
 def on_js_command(handled, cmd, context):
-    """Receive JS messages from reviewer webview."""
     if cmd.startswith("kanjiLookup:"):
         word = cmd.split(":", 1)[1]
         meanings = lookup_with_cache(word)
-        if meanings:
-            msg = "<br>".join(f"{k}: {v}" for k, v in meanings.items() if v)
-        else:
-            msg = f"No kanji found in '{word}'."
-        tooltip(msg, period=5000)
+        html = "<br>".join(f"{k}: {v}" for k, v in meanings.items() if v) or f"No kanji found in '{word}'."
+        js = f"if (window.AnkiHoverShow) window.AnkiHoverShow({json.dumps(word)}, {json.dumps(html)});"
+        context.web.eval(js)
         return (True, None)
     return handled
 
 
 gui_hooks.webview_will_set_content.append(inject_hover_script)
 gui_hooks.webview_did_receive_js_message.append(on_js_command)
+
+print("[Kanji Constituent] Reviewer hover lookup loaded (Ctrl+K or right-click to use).")
 
 menu_act = QAction("Kanji Constituent Options…", mw)
 menu_act.triggered.connect(show_options)

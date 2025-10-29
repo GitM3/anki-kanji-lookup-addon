@@ -8,6 +8,8 @@
     "noteTypes": "",
     "lookupOnAdd": true,
     "bulkActionLabel": "Bulk‑add Constituents",
+    "hoverFontSize": "auto",
+    "hoverOffset": "-10",
     "debug": true
   }
 }
