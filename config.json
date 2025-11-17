@@ -9,7 +9,7 @@
     "lookupOnAdd": true,
     "bulkActionLabel": "Bulk‑add Constituents",
     "hoverFontSize": "auto",
-    "hoverOffset": "-10",
+    "hoverOffset": "-50",
     "debug": true
   }
 }

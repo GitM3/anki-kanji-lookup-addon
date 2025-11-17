@@ -200,7 +200,7 @@ def bulk_add(nids: List[int]):
     for nid in nids:
         note = col.get_note(nid)
         if populate(note):
-            note.flush()
+            col.update_note(note)
             changed += 1
     tooltip(f"Updated {changed} notes" if changed else "No notes needed")
     log("Bulk finished –", changed, "of", len(nids))
@@ -309,14 +309,17 @@ def lookup_with_cache(word: str) -> Dict[str, str]:
     new_kanji: List[str] = []
 
     # Step 1: Check cache
+    log("Checking cache")
     for k in kanji_list:
         if k in KANJI_CACHE:
             result[k] = KANJI_CACHE[k]
+            log("Found in cache")
         else:
             new_kanji.append(k)
 
     # Step 2: Deck lookup for missing ones
     if new_kanji:
+        log("Not found in cache, looking up")
         meanings = lookup_meanings(new_kanji)
         result.update(meanings)
         # Update cache
@@ -451,6 +454,7 @@ def on_js_command(handled, cmd, context):
     if cmd.startswith("kanjiLookup:"):
         word = cmd.split(":", 1)[1]
         meanings = lookup_with_cache(word)
+        log(f"Meaning found:{meanings}")
         html = "<br>".join(f"{k}: {v}" for k, v in meanings.items() if v) or f"No kanji found in '{word}'."
         js = f"if (window.AnkiHoverShow) window.AnkiHoverShow({json.dumps(word)}, {json.dumps(html)});"
         context.web.eval(js)
